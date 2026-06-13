@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/mailhog/data"
@@ -123,7 +124,7 @@ func (maildir *Maildir) Search(kind, query string, start, limit int) (*data.Mess
 	return &msgs, len(filteredMessages), nil
 }
 
-// List lists stored messages by index
+// List lists stored messages by index, newest first.
 func (maildir *Maildir) List(start, limit int) (*data.Messages, error) {
 	log.Println("Listing messages in", maildir.Path)
 	messages := make([]data.Message, 0)
@@ -134,15 +135,55 @@ func (maildir *Maildir) List(start, limit int) (*data.Messages, error) {
 	}
 	defer dir.Close()
 
-	n, err := dir.Readdir(0)
+	infos, err := dir.Readdir(0)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, fileinfo := range n {
+	// Only consider regular files. A maildir directory may legitimately
+	// contain subdirectories (e.g. cur/new/tmp) or unrelated hidden files
+	// which are not MailHog messages; including them previously caused the
+	// whole listing to fail with a 500.
+	files := make([]os.FileInfo, 0, len(infos))
+	for _, info := range infos {
+		if info.IsDir() {
+			continue
+		}
+		files = append(files, info)
+	}
+
+	// Sort newest first so the ordering matches the in-memory and MongoDB
+	// backends (the UI expects the most recent messages first). Fall back to
+	// the file name to keep the ordering deterministic when modification
+	// times collide.
+	sort.Slice(files, func(i, j int) bool {
+		ti, tj := files[i].ModTime(), files[j].ModTime()
+		if ti.Equal(tj) {
+			return files[i].Name() > files[j].Name()
+		}
+		return ti.After(tj)
+	})
+
+	// Apply the requested window, mirroring the semantics of the other
+	// storage backends.
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(files) {
+		msgs := data.Messages(messages)
+		return &msgs, nil
+	}
+	end := len(files)
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+
+	for _, fileinfo := range files[start:end] {
 		b, err := ioutil.ReadFile(filepath.Join(maildir.Path, fileinfo.Name()))
 		if err != nil {
-			return nil, err
+			// A single unreadable message must not break the whole listing.
+			log.Printf("Error reading message %s: %s", fileinfo.Name(), err)
+			continue
 		}
 		msg := data.FromBytes(b)
 		// FIXME domain
@@ -173,7 +214,23 @@ func (maildir *Maildir) DeleteAll() error {
 
 // Load returns an individual message by storage ID
 func (maildir *Maildir) Load(id string) (*data.Message, error) {
-	b, err := ioutil.ReadFile(filepath.Join(maildir.Path, id))
+	path := filepath.Join(maildir.Path, id)
+
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Match the in-memory backend: a missing message is not an error.
+			// Callers (and the HTTP API) then return an empty result instead
+			// of a 500, e.g. when a message was just deleted.
+			return nil, nil
+		}
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, nil
+	}
+
+	b, err := ioutil.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
