@@ -1,0 +1,90 @@
+# github.com/gorilla/context v0.0.0-20160817184632-08b5f424b927
+## explicit
+github.com/gorilla/context
+# github.com/gorilla/mux v0.0.0-20170228224354-599cba5e7b61
+## explicit
+github.com/gorilla/mux
+# github.com/gorilla/pat v0.0.0-20160413041632-cf955c3d1f2c
+## explicit
+github.com/gorilla/pat
+# github.com/gorilla/websocket v0.0.0-20170319172727-a91eba7f9777
+## explicit
+github.com/gorilla/websocket
+# github.com/ian-kent/envconf v0.0.0-20141026121121-c19809918c02
+## explicit
+github.com/ian-kent/envconf
+# github.com/ian-kent/go-log v0.0.0-20160113211217-5731446c36ab
+## explicit
+github.com/ian-kent/go-log/appenders
+github.com/ian-kent/go-log/layout
+github.com/ian-kent/go-log/levels
+github.com/ian-kent/go-log/log
+github.com/ian-kent/go-log/logger
+# github.com/ian-kent/goose v0.0.0-20141221090059-c3541ea826ad
+## explicit
+github.com/ian-kent/goose
+# github.com/ian-kent/linkio v0.0.0-20141229112453-77fb4b01842c
+## explicit
+github.com/ian-kent/linkio
+# github.com/jtolds/gls v0.0.0-20161228004338-bb0351aa7eb6
+## explicit
+github.com/jtolds/gls
+# github.com/mailhog/MailHog-Server v0.0.0-20170416232909-50f74a1aa299
+## explicit
+github.com/mailhog/MailHog-Server/api
+github.com/mailhog/MailHog-Server/config
+github.com/mailhog/MailHog-Server/monkey
+github.com/mailhog/MailHog-Server/smtp
+github.com/mailhog/MailHog-Server/websockets
+# github.com/mailhog/MailHog-UI v0.0.0-20170416232850-24b31a47cc5b
+## explicit
+github.com/mailhog/MailHog-UI/assets
+github.com/mailhog/MailHog-UI/config
+github.com/mailhog/MailHog-UI/web
+# github.com/mailhog/data v0.0.0-20170416191344-024d554958b5
+## explicit
+github.com/mailhog/data
+# github.com/mailhog/http v0.0.0-20170416222752-2e653938bf19
+## explicit
+github.com/mailhog/http
+# github.com/mailhog/mhsendmail v0.0.0-20160920204233-c097b3bc3fe7
+## explicit
+github.com/mailhog/mhsendmail/cmd
+# github.com/mailhog/smtp v0.0.0-20161119230107-0c4e9b7e0625
+## explicit
+github.com/mailhog/smtp
+# github.com/mailhog/storage v0.0.0-20170416222739-6d871fb23ecd
+## explicit
+github.com/mailhog/storage
+# github.com/philhofer/fwd v0.0.0-20160129035939-98c11a7a6ec8
+## explicit
+github.com/philhofer/fwd
+# github.com/smartystreets/assertions v0.0.0-20161213224810-26acb9229f42
+## explicit
+github.com/smartystreets/assertions
+github.com/smartystreets/assertions/internal/go-render/render
+github.com/smartystreets/assertions/internal/oglematchers
+# github.com/smartystreets/goconvey v0.0.0-20170110120022-3bd662eac601
+## explicit
+github.com/smartystreets/goconvey/convey
+github.com/smartystreets/goconvey/convey/gotest
+github.com/smartystreets/goconvey/convey/reporting
+# github.com/spf13/pflag v0.0.0-20160920204233-c097b3bc3fe7
+## explicit
+github.com/spf13/pflag
+# github.com/t-k/fluent-logger-golang v0.0.0-20150526075618-0f8ec08f2057
+## explicit
+github.com/t-k/fluent-logger-golang/fluent
+# github.com/tinylib/msgp v0.0.0-20160524150606-05e600edf28f
+## explicit
+github.com/tinylib/msgp/msgp
+# golang.org/x/crypto v0.0.0-20161221045410-f6b343c37ca8
+## explicit
+golang.org/x/crypto/bcrypt
+golang.org/x/crypto/blowfish
+# gopkg.in/mgo.v2 v2.0.0-20160609180028-29cc868a5ca6
+## explicit
+gopkg.in/mgo.v2
+gopkg.in/mgo.v2/bson
+gopkg.in/mgo.v2/internal/sasl
+gopkg.in/mgo.v2/internal/scram
