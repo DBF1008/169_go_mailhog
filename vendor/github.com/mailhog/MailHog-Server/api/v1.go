@@ -13,7 +13,6 @@ import (
 	"github.com/ian-kent/go-log/log"
 	"github.com/mailhog/MailHog-Server/config"
 	"github.com/mailhog/data"
-	"github.com/mailhog/storage"
 
 	"github.com/ian-kent/goose"
 )
@@ -125,20 +124,20 @@ func (apiv1 *APIv1) messages(w http.ResponseWriter, req *http.Request) {
 	apiv1.defaultOptions(w, req)
 
 	// TODO start, limit
-	switch apiv1.config.Storage.(type) {
-	case *storage.MongoDB:
-		messages, _ := apiv1.config.Storage.(*storage.MongoDB).List(0, 1000)
-		bytes, _ := json.Marshal(messages)
-		w.Header().Add("Content-Type", "text/json")
-		w.Write(bytes)
-	case *storage.InMemory:
-		messages, _ := apiv1.config.Storage.(*storage.InMemory).List(0, 1000)
-		bytes, _ := json.Marshal(messages)
-		w.Header().Add("Content-Type", "text/json")
-		w.Write(bytes)
-	default:
+	messages, err := apiv1.config.Storage.List(0, 1000)
+	if err != nil {
+		log.Printf("- Error listing messages: %s", err)
 		w.WriteHeader(500)
+		return
 	}
+	bytes, err := json.Marshal(messages)
+	if err != nil {
+		log.Printf("- Error marshalling messages: %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Add("Content-Type", "text/json")
+	w.Write(bytes)
 }
 
 func (apiv1 *APIv1) message(w http.ResponseWriter, req *http.Request) {
@@ -151,6 +150,12 @@ func (apiv1 *APIv1) message(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		log.Printf("- Error: %s", err)
 		w.WriteHeader(500)
+		return
+	}
+
+	if message == nil {
+		log.Printf("- Message not found: %s", id)
+		w.WriteHeader(404)
 		return
 	}
 
@@ -167,33 +172,32 @@ func (apiv1 *APIv1) message(w http.ResponseWriter, req *http.Request) {
 
 func (apiv1 *APIv1) download(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get(":id")
-	log.Printf("[APIv1] GET /api/v1/messages/%s\n", id)
+	log.Printf("[APIv1] GET /api/v1/messages/%s/download\n", id)
 
 	apiv1.defaultOptions(w, req)
+
+	message, err := apiv1.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error loading message %s: %s", id, err)
+		w.WriteHeader(500)
+		return
+	}
+
+	if message == nil {
+		log.Printf("- Message not found: %s", id)
+		w.WriteHeader(404)
+		return
+	}
 
 	w.Header().Set("Content-Type", "message/rfc822")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".eml\"")
 
-	switch apiv1.config.Storage.(type) {
-	case *storage.MongoDB:
-		message, _ := apiv1.config.Storage.(*storage.MongoDB).Load(id)
-		for h, l := range message.Content.Headers {
-			for _, v := range l {
-				w.Write([]byte(h + ": " + v + "\r\n"))
-			}
+	for h, l := range message.Content.Headers {
+		for _, v := range l {
+			w.Write([]byte(h + ": " + v + "\r\n"))
 		}
-		w.Write([]byte("\r\n" + message.Content.Body))
-	case *storage.InMemory:
-		message, _ := apiv1.config.Storage.(*storage.InMemory).Load(id)
-		for h, l := range message.Content.Headers {
-			for _, v := range l {
-				w.Write([]byte(h + ": " + v + "\r\n"))
-			}
-		}
-		w.Write([]byte("\r\n" + message.Content.Body))
-	default:
-		w.WriteHeader(500)
 	}
+	w.Write([]byte("\r\n" + message.Content.Body))
 }
 
 func (apiv1 *APIv1) download_part(w http.ResponseWriter, req *http.Request) {
@@ -204,11 +208,41 @@ func (apiv1 *APIv1) download_part(w http.ResponseWriter, req *http.Request) {
 	// TODO extension from content-type?
 	apiv1.defaultOptions(w, req)
 
+	message, err := apiv1.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error loading message %s: %s", id, err)
+		w.WriteHeader(500)
+		return
+	}
+
+	if message == nil {
+		log.Printf("- Message not found: %s", id)
+		w.WriteHeader(404)
+		return
+	}
+
+	if message.MIME == nil {
+		log.Printf("- Message %s is not a MIME multipart message", id)
+		w.WriteHeader(400)
+		return
+	}
+
+	pid, err := strconv.Atoi(part)
+	if err != nil {
+		log.Printf("- Invalid part index: %s", part)
+		w.WriteHeader(400)
+		return
+	}
+
+	if pid < 0 || pid >= len(message.MIME.Parts) {
+		log.Printf("- Part index out of range: %d (message has %d parts)", pid, len(message.MIME.Parts))
+		w.WriteHeader(400)
+		return
+	}
+
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+"-part-"+part+"\"")
 
-	message, _ := apiv1.config.Storage.Load(id)
 	contentTransferEncoding := ""
-	pid, _ := strconv.Atoi(part)
 	for h, l := range message.MIME.Parts[pid].Headers {
 		for _, v := range l {
 			switch strings.ToLower(h) {
@@ -260,11 +294,22 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 	apiv1.defaultOptions(w, req)
 
 	w.Header().Add("Content-Type", "text/json")
-	msg, _ := apiv1.config.Storage.Load(id)
+	msg, err := apiv1.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error loading message %s: %s", id, err)
+		w.WriteHeader(500)
+		return
+	}
+
+	if msg == nil {
+		log.Printf("- Message not found: %s", id)
+		w.WriteHeader(404)
+		return
+	}
 
 	decoder := json.NewDecoder(req.Body)
 	var cfg ReleaseConfig
-	err := decoder.Decode(&cfg)
+	err = decoder.Decode(&cfg)
 	if err != nil {
 		log.Printf("Error decoding request body: %s", err)
 		w.WriteHeader(500)
