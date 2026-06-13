@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/smtp"
 	"strconv"
 
 	"github.com/gorilla/pat"
@@ -44,7 +46,16 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	r.Path(conf.WebPath + "/api/v2/jim").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
 	r.Path(conf.WebPath + "/api/v2/outgoing-smtp").Methods("GET").HandlerFunc(apiv2.listOutgoingSMTP)
+	r.Path(conf.WebPath + "/api/v2/outgoing-smtp").Methods("POST").HandlerFunc(apiv2.createOutgoingSMTP)
 	r.Path(conf.WebPath + "/api/v2/outgoing-smtp").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+
+	r.Path(conf.WebPath + "/api/v2/outgoing-smtp/{name}").Methods("GET").HandlerFunc(apiv2.getOutgoingSMTP)
+	r.Path(conf.WebPath + "/api/v2/outgoing-smtp/{name}").Methods("PUT").HandlerFunc(apiv2.updateOutgoingSMTP)
+	r.Path(conf.WebPath + "/api/v2/outgoing-smtp/{name}").Methods("DELETE").HandlerFunc(apiv2.deleteOutgoingSMTP)
+	r.Path(conf.WebPath + "/api/v2/outgoing-smtp/{name}").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/release").Methods("POST").HandlerFunc(apiv2.releaseOne)
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/release").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
 	r.Path(conf.WebPath + "/api/v2/websocket").Methods("GET").HandlerFunc(apiv2.websocket)
 
@@ -243,6 +254,243 @@ func (apiv2 *APIv2) listOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
 	b, _ := json.Marshal(apiv2.config.OutgoingSMTP)
 	w.Header().Add("Content-Type", "application/json")
 	w.Write(b)
+}
+
+// smtpSendMail sends a message via SMTP. It is a package-level variable so
+// tests can substitute it without performing real network I/O.
+var smtpSendMail = smtp.SendMail
+
+// validateOutgoingSMTP checks that an outgoing SMTP server template is usable.
+func validateOutgoingSMTP(s *config.OutgoingSMTP) error {
+	if len(s.Name) == 0 {
+		return errors.New("name is required")
+	}
+	if len(s.Host) == 0 {
+		return errors.New("host is required")
+	}
+	if len(s.Port) == 0 {
+		return errors.New("port is required")
+	}
+	switch s.Mechanism {
+	case "", "PLAIN", "CRAMMD5":
+		// supported
+	default:
+		return errors.New("mechanism must be PLAIN or CRAMMD5")
+	}
+	if (len(s.Username) > 0 || len(s.Password) > 0) && s.Mechanism != "PLAIN" && s.Mechanism != "CRAMMD5" {
+		return errors.New("mechanism must be PLAIN or CRAMMD5 when a username or password is provided")
+	}
+	return nil
+}
+
+func (apiv2 *APIv2) getOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
+	name := req.URL.Query().Get(":name")
+	log.Printf("[APIv2] GET /api/v2/outgoing-smtp/%s\n", name)
+
+	apiv2.defaultOptions(w, req)
+
+	server, ok := apiv2.config.OutgoingSMTP[name]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	b, _ := json.Marshal(server)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(b)
+}
+
+func (apiv2 *APIv2) createOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
+	log.Println("[APIv2] POST /api/v2/outgoing-smtp")
+
+	apiv2.defaultOptions(w, req)
+
+	var server config.OutgoingSMTP
+	if err := json.NewDecoder(req.Body).Decode(&server); err != nil {
+		log.Printf("Error decoding request body: %s", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error decoding request body"))
+		return
+	}
+
+	if err := validateOutgoingSMTP(&server); err != nil {
+		log.Printf("Invalid outgoing SMTP server: %s", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	if apiv2.config.OutgoingSMTP == nil {
+		apiv2.config.OutgoingSMTP = make(map[string]*config.OutgoingSMTP)
+	}
+
+	if _, ok := apiv2.config.OutgoingSMTP[server.Name]; ok {
+		log.Printf("Outgoing SMTP server already exists: %s", server.Name)
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte("An outgoing SMTP server with that name already exists"))
+		return
+	}
+
+	apiv2.config.OutgoingSMTP[server.Name] = &server
+	log.Printf("Created outgoing SMTP server %s", server.Name)
+
+	b, _ := json.Marshal(server)
+	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	w.Write(b)
+}
+
+func (apiv2 *APIv2) updateOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
+	name := req.URL.Query().Get(":name")
+	log.Printf("[APIv2] PUT /api/v2/outgoing-smtp/%s\n", name)
+
+	apiv2.defaultOptions(w, req)
+
+	if _, ok := apiv2.config.OutgoingSMTP[name]; !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	var server config.OutgoingSMTP
+	if err := json.NewDecoder(req.Body).Decode(&server); err != nil {
+		log.Printf("Error decoding request body: %s", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error decoding request body"))
+		return
+	}
+
+	// The name in the path identifies the template and is authoritative.
+	server.Name = name
+
+	if err := validateOutgoingSMTP(&server); err != nil {
+		log.Printf("Invalid outgoing SMTP server: %s", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	apiv2.config.OutgoingSMTP[name] = &server
+	log.Printf("Updated outgoing SMTP server %s", name)
+
+	b, _ := json.Marshal(server)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(b)
+}
+
+func (apiv2 *APIv2) deleteOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
+	name := req.URL.Query().Get(":name")
+	log.Printf("[APIv2] DELETE /api/v2/outgoing-smtp/%s\n", name)
+
+	apiv2.defaultOptions(w, req)
+
+	if _, ok := apiv2.config.OutgoingSMTP[name]; !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	delete(apiv2.config.OutgoingSMTP, name)
+	log.Printf("Deleted outgoing SMTP server %s", name)
+	w.WriteHeader(http.StatusOK)
+}
+
+// releaseRequest is the body of a v2 release: it names a stored outgoing SMTP
+// template to reuse, and may explicitly override the recipient address.
+type releaseRequest struct {
+	Name  string
+	Email string
+}
+
+func (apiv2 *APIv2) releaseOne(w http.ResponseWriter, req *http.Request) {
+	id := req.URL.Query().Get(":id")
+	log.Printf("[APIv2] POST /api/v2/messages/%s/release\n", id)
+
+	apiv2.defaultOptions(w, req)
+
+	w.Header().Add("Content-Type", "text/json")
+
+	var rel releaseRequest
+	if err := json.NewDecoder(req.Body).Decode(&rel); err != nil {
+		log.Printf("Error decoding request body: %s", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error decoding request body"))
+		return
+	}
+
+	// v2 release only ever reuses a saved template; it never accepts an inline
+	// server config. A template name is therefore required.
+	if len(rel.Name) == 0 {
+		log.Printf("No outgoing SMTP server name provided")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("An outgoing SMTP server name is required"))
+		return
+	}
+
+	server, ok := apiv2.config.OutgoingSMTP[rel.Name]
+	if !ok {
+		log.Printf("Outgoing SMTP server not found: %s", rel.Name)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("Outgoing SMTP server not found"))
+		return
+	}
+
+	// The recipient may be overridden per-release; otherwise fall back to the
+	// address stored on the template.
+	email := server.Email
+	if len(rel.Email) > 0 {
+		email = rel.Email
+	}
+	if len(email) == 0 {
+		log.Printf("No recipient address for release")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("A recipient email address is required"))
+		return
+	}
+
+	msg, err := apiv2.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("Error loading message %s: %s", id, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if msg == nil {
+		log.Printf("Message not found: %s", id)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("Message not found"))
+		return
+	}
+
+	log.Printf("Releasing %s to %s (via %s:%s)", id, email, server.Host, server.Port)
+
+	bytes := make([]byte, 0)
+	for h, l := range msg.Content.Headers {
+		for _, v := range l {
+			bytes = append(bytes, []byte(h+": "+v+"\r\n")...)
+		}
+	}
+	bytes = append(bytes, []byte("\r\n"+msg.Content.Body)...)
+
+	var auth smtp.Auth
+	if len(server.Username) > 0 || len(server.Password) > 0 {
+		log.Printf("Found username/password, using auth mechanism: [%s]", server.Mechanism)
+		switch server.Mechanism {
+		case "CRAMMD5":
+			auth = smtp.CRAMMD5Auth(server.Username, server.Password)
+		case "PLAIN":
+			auth = smtp.PlainAuth("", server.Username, server.Password, server.Host)
+		default:
+			log.Printf("Error - invalid authentication mechanism")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
+
+	err = smtpSendMail(server.Host+":"+server.Port, auth, "nobody@"+apiv2.config.Hostname, []string{email}, bytes)
+	if err != nil {
+		log.Printf("Failed to release message: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Message released successfully")
 }
 
 func (apiv2 *APIv2) websocket(w http.ResponseWriter, req *http.Request) {
