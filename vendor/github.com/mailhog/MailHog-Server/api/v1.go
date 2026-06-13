@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/smtp"
 	"strconv"
 	"strings"
 	"time"
@@ -276,8 +275,10 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 
 	log.Printf("Got message: %s", msg.ID)
 
+	apiv1.config.OutgoingSMTPMu.Lock()
 	if cfg.Save {
 		if _, ok := apiv1.config.OutgoingSMTP[cfg.Name]; ok {
+			apiv1.config.OutgoingSMTPMu.Unlock()
 			log.Printf("Server already exists named %s", cfg.Name)
 			w.WriteHeader(400)
 			return
@@ -300,40 +301,15 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 			cfg.Password = c.Password
 			cfg.Mechanism = c.Mechanism
 		} else {
+			apiv1.config.OutgoingSMTPMu.Unlock()
 			log.Printf("Server not found: %s", cfg.Name)
 			w.WriteHeader(400)
 			return
 		}
 	}
+	apiv1.config.OutgoingSMTPMu.Unlock()
 
-	log.Printf("Releasing to %s (via %s:%s)", cfg.Email, cfg.Host, cfg.Port)
-
-	bytes := make([]byte, 0)
-	for h, l := range msg.Content.Headers {
-		for _, v := range l {
-			bytes = append(bytes, []byte(h+": "+v+"\r\n")...)
-		}
-	}
-	bytes = append(bytes, []byte("\r\n"+msg.Content.Body)...)
-
-	var auth smtp.Auth
-
-	if len(cfg.Username) > 0 || len(cfg.Password) > 0 {
-		log.Printf("Found username/password, using auth mechanism: [%s]", cfg.Mechanism)
-		switch cfg.Mechanism {
-		case "CRAMMD5":
-			auth = smtp.CRAMMD5Auth(cfg.Username, cfg.Password)
-		case "PLAIN":
-			auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		default:
-			log.Printf("Error - invalid authentication mechanism")
-			w.WriteHeader(400)
-			return
-		}
-	}
-
-	err = smtp.SendMail(cfg.Host+":"+cfg.Port, auth, "nobody@"+apiv1.config.Hostname, []string{cfg.Email}, bytes)
-	if err != nil {
+	if err := releaseViaSMTP(msg, (*config.OutgoingSMTP)(&cfg), apiv1.config.Hostname); err != nil {
 		log.Printf("Failed to release message: %s", err)
 		w.WriteHeader(500)
 		return

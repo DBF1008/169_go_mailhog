@@ -3,8 +3,10 @@ package config
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"log"
+	"sync"
 
 	"github.com/ian-kent/envconf"
 	"github.com/mailhog/MailHog-Server/monkey"
@@ -48,6 +50,7 @@ type Config struct {
 	Monkey           monkey.ChaosMonkey
 	OutgoingSMTPFile string
 	OutgoingSMTP     map[string]*OutgoingSMTP
+	OutgoingSMTPMu   sync.Mutex
 	WebPath          string
 }
 
@@ -61,6 +64,23 @@ type OutgoingSMTP struct {
 	Username  string
 	Password  string
 	Mechanism string
+}
+
+// ValidateForCreate checks fields required when creating a new template.
+func (o *OutgoingSMTP) ValidateForCreate() error {
+	if o.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if o.Host == "" {
+		return fmt.Errorf("host is required")
+	}
+	if o.Port == "" {
+		return fmt.Errorf("port is required")
+	}
+	if o.Mechanism != "" && o.Mechanism != "PLAIN" && o.Mechanism != "CRAMMD5" {
+		return fmt.Errorf("mechanism must be PLAIN or CRAMMD5")
+	}
+	return nil
 }
 
 var cfg = DefaultConfig()
