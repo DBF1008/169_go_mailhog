@@ -153,6 +153,11 @@ func (apiv1 *APIv1) message(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(500)
 		return
 	}
+	if message == nil {
+		log.Printf("- Message not found: %s", id)
+		w.WriteHeader(404)
+		return
+	}
 
 	bytes, err := json.Marshal(message)
 	if err != nil {
@@ -171,29 +176,27 @@ func (apiv1 *APIv1) download(w http.ResponseWriter, req *http.Request) {
 
 	apiv1.defaultOptions(w, req)
 
+	message, err := apiv1.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error: %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	if message == nil {
+		log.Printf("- Message not found: %s", id)
+		w.WriteHeader(404)
+		return
+	}
+
 	w.Header().Set("Content-Type", "message/rfc822")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".eml\"")
 
-	switch apiv1.config.Storage.(type) {
-	case *storage.MongoDB:
-		message, _ := apiv1.config.Storage.(*storage.MongoDB).Load(id)
-		for h, l := range message.Content.Headers {
-			for _, v := range l {
-				w.Write([]byte(h + ": " + v + "\r\n"))
-			}
+	for h, l := range message.Content.Headers {
+		for _, v := range l {
+			w.Write([]byte(h + ": " + v + "\r\n"))
 		}
-		w.Write([]byte("\r\n" + message.Content.Body))
-	case *storage.InMemory:
-		message, _ := apiv1.config.Storage.(*storage.InMemory).Load(id)
-		for h, l := range message.Content.Headers {
-			for _, v := range l {
-				w.Write([]byte(h + ": " + v + "\r\n"))
-			}
-		}
-		w.Write([]byte("\r\n" + message.Content.Body))
-	default:
-		w.WriteHeader(500)
 	}
+	w.Write([]byte("\r\n" + message.Content.Body))
 }
 
 func (apiv1 *APIv1) download_part(w http.ResponseWriter, req *http.Request) {
@@ -204,11 +207,28 @@ func (apiv1 *APIv1) download_part(w http.ResponseWriter, req *http.Request) {
 	// TODO extension from content-type?
 	apiv1.defaultOptions(w, req)
 
+	message, err := apiv1.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error: %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	if message == nil {
+		log.Printf("- Message not found: %s", id)
+		w.WriteHeader(404)
+		return
+	}
+
+	pid, err := strconv.Atoi(part)
+	if err != nil || message.MIME == nil || pid < 0 || pid >= len(message.MIME.Parts) {
+		log.Printf("- Invalid MIME part '%s' for message %s", part, id)
+		w.WriteHeader(404)
+		return
+	}
+
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+"-part-"+part+"\"")
 
-	message, _ := apiv1.config.Storage.Load(id)
 	contentTransferEncoding := ""
-	pid, _ := strconv.Atoi(part)
 	for h, l := range message.MIME.Parts[pid].Headers {
 		for _, v := range l {
 			switch strings.ToLower(h) {
