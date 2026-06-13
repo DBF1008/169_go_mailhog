@@ -2,7 +2,6 @@ package storage
 
 import (
 	"errors"
-	"strings"
 	"sync"
 
 	"github.com/mailhog/data"
@@ -37,125 +36,43 @@ func (memory *InMemory) Count() int {
 	return len(memory.Messages)
 }
 
-// Search finds messages matching the query
+// Search finds messages matching the query, newest first.
+//
+// It returns the requested window of matches together with the total number of
+// matching messages, which is independent of the window. See query.go for the
+// shared listing, sorting and windowing semantics.
 func (memory *InMemory) Search(kind, query string, start, limit int) (*data.Messages, int, error) {
-	// FIXME needs optimising, or replacing with a proper db!
-	query = strings.ToLower(query)
-	var filteredMessages = make([]*data.Message, 0)
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+
+	matched := make([]data.Message, 0)
 	for _, m := range memory.Messages {
-		doAppend := false
-
-		switch kind {
-		case "to":
-			for _, to := range m.To {
-				if strings.Contains(strings.ToLower(to.Mailbox+"@"+to.Domain), query) {
-					doAppend = true
-					break
-				}
-			}
-			if !doAppend {
-				if hdr, ok := m.Content.Headers["To"]; ok {
-					for _, to := range hdr {
-						if strings.Contains(strings.ToLower(to), query) {
-							doAppend = true
-							break
-						}
-					}
-				}
-			}
-		case "from":
-			if strings.Contains(strings.ToLower(m.From.Mailbox+"@"+m.From.Domain), query) {
-				doAppend = true
-			}
-			if !doAppend {
-				if hdr, ok := m.Content.Headers["From"]; ok {
-					for _, from := range hdr {
-						if strings.Contains(strings.ToLower(from), query) {
-							doAppend = true
-							break
-						}
-					}
-				}
-			}
-		case "containing":
-			if strings.Contains(strings.ToLower(m.Content.Body), query) {
-				doAppend = true
-			}
-			if !doAppend {
-				for _, hdr := range m.Content.Headers {
-					for _, v := range hdr {
-						if strings.Contains(strings.ToLower(v), query) {
-							doAppend = true
-						}
-					}
-				}
-			}
-		}
-
-		if doAppend {
-			filteredMessages = append(filteredMessages, m)
+		if matches(m, kind, query) {
+			matched = append(matched, *m)
 		}
 	}
 
-	var messages = make([]data.Message, 0)
+	sortByCreatedDesc(matched)
+	page := window(matched, start, limit)
 
-	if len(filteredMessages) == 0 || start > len(filteredMessages) {
-		msgs := data.Messages(messages)
-		return &msgs, 0, nil
-	}
-
-	if start+limit > len(filteredMessages) {
-		limit = len(filteredMessages) - start
-	}
-
-	start = len(filteredMessages) - start - 1
-	end := start - limit
-
-	if start < 0 {
-		start = 0
-	}
-	if end < -1 {
-		end = -1
-	}
-
-	for i := start; i > end; i-- {
-		//for _, m := range memory.MessageIndex[start:end] {
-		messages = append(messages, *filteredMessages[i])
-	}
-
-	msgs := data.Messages(messages)
-	return &msgs, len(filteredMessages), nil
+	msgs := data.Messages(page)
+	return &msgs, len(matched), nil
 }
 
-// List lists stored messages by index
+// List lists stored messages, newest first, returning the requested window.
 func (memory *InMemory) List(start int, limit int) (*data.Messages, error) {
-	var messages = make([]data.Message, 0)
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
 
-	if len(memory.Messages) == 0 || start > len(memory.Messages) {
-		msgs := data.Messages(messages)
-		return &msgs, nil
+	all := make([]data.Message, 0, len(memory.Messages))
+	for _, m := range memory.Messages {
+		all = append(all, *m)
 	}
 
-	if start+limit > len(memory.Messages) {
-		limit = len(memory.Messages) - start
-	}
+	sortByCreatedDesc(all)
+	page := window(all, start, limit)
 
-	start = len(memory.Messages) - start - 1
-	end := start - limit
-
-	if start < 0 {
-		start = 0
-	}
-	if end < -1 {
-		end = -1
-	}
-
-	for i := start; i > end; i-- {
-		//for _, m := range memory.MessageIndex[start:end] {
-		messages = append(messages, *memory.Messages[i])
-	}
-
-	msgs := data.Messages(messages)
+	msgs := data.Messages(page)
 	return &msgs, nil
 }
 

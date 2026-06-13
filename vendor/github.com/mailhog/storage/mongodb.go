@@ -48,49 +48,58 @@ func (mongo *MongoDB) Count() int {
 	return c
 }
 
-// Search finds messages matching the query
+// Search finds messages matching the query, newest first.
+//
+// It returns the requested window of matches together with the total number of
+// matching messages, which is independent of the window. As with List, MongoDB
+// realizes the shared contract (see query.go) server-side: Sort("-created")
+// orders the results, Skip/Limit select the window, and a separate unbounded
+// Count over the same filter yields the total.
 func (mongo *MongoDB) Search(kind, query string, start, limit int) (*data.Messages, int, error) {
 	messages := &data.Messages{}
-	var count = 0
-	var field = "raw.data"
+
+	field := "raw.data"
 	switch kind {
 	case "to":
 		field = "raw.to"
 	case "from":
 		field = "raw.from"
 	}
-	err := mongo.Collection.Find(bson.M{field: bson.RegEx{Pattern: query, Options: "i"}}).Skip(start).Limit(limit).Sort("-created").Select(bson.M{
-		"id":              1,
-		"_id":             1,
-		"from":            1,
-		"to":              1,
-		"content.headers": 1,
-		"content.size":    1,
-		"created":         1,
-		"raw":             1,
-	}).All(messages)
+	filter := bson.M{field: bson.RegEx{Pattern: query, Options: "i"}}
+
+	err := mongo.Collection.Find(filter).Skip(start).Limit(limit).Sort("-created").Select(messageListFields).All(messages)
 	if err != nil {
 		log.Printf("Error loading messages: %s", err)
 		return nil, 0, err
 	}
-	count, _ = mongo.Collection.Find(bson.M{field: bson.RegEx{Pattern: query, Options: "i"}}).Count()
+
+	// Count uses a fresh query without Skip/Limit so it reflects the full
+	// number of matches rather than the size of the returned window.
+	count, _ := mongo.Collection.Find(filter).Count()
 
 	return messages, count, nil
 }
 
-// List returns a list of messages by index
+// messageListFields is the projection returned when listing or searching
+// messages. It is shared by List and Search so the two never drift apart.
+var messageListFields = bson.M{
+	"id":              1,
+	"_id":             1,
+	"from":            1,
+	"to":              1,
+	"content.headers": 1,
+	"content.size":    1,
+	"created":         1,
+	"raw":             1,
+}
+
+// List returns the requested window of messages, newest first.
+//
+// MongoDB realizes the shared listing contract (see query.go) server-side:
+// Sort("-created") orders newest-first and Skip/Limit select the window.
 func (mongo *MongoDB) List(start int, limit int) (*data.Messages, error) {
 	messages := &data.Messages{}
-	err := mongo.Collection.Find(bson.M{}).Skip(start).Limit(limit).Sort("-created").Select(bson.M{
-		"id":              1,
-		"_id":             1,
-		"from":            1,
-		"to":              1,
-		"content.headers": 1,
-		"content.size":    1,
-		"created":         1,
-		"raw":             1,
-	}).All(messages)
+	err := mongo.Collection.Find(bson.M{}).Skip(start).Limit(limit).Sort("-created").Select(messageListFields).All(messages)
 	if err != nil {
 		log.Printf("Error loading messages: %s", err)
 		return nil, err

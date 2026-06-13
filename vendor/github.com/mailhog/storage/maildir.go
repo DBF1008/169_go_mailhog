@@ -1,12 +1,10 @@
 package storage
 
 import (
-	"errors"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/mailhog/data"
 )
@@ -60,100 +58,83 @@ func (maildir *Maildir) Count() int {
 	return len(n)
 }
 
-// Search finds messages matching the query
-func (maildir *Maildir) Search(kind, query string, start, limit int) (*data.Messages, int, error) {
-	query = strings.ToLower(query)
-	var filteredMessages = make([]data.Message, 0)
-
-	var matched int
-
-	err := filepath.Walk(maildir.Path, func(path string, info os.FileInfo, err error) error {
-		if limit > 0 && len(filteredMessages) >= limit {
-			return errors.New("reached limit")
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		msg, err := maildir.Load(info.Name())
-		if err != nil {
-			log.Println(err)
-			return nil
-		}
-
-		switch kind {
-		case "to":
-			for _, t := range msg.To {
-				if strings.Contains(strings.ToLower(t.Mailbox+"@"+t.Domain), query) {
-					if start > matched {
-						matched++
-						break
-					}
-					filteredMessages = append(filteredMessages, *msg)
-					break
-				}
-			}
-		case "from":
-			if strings.Contains(strings.ToLower(msg.From.Mailbox+"@"+msg.From.Domain), query) {
-				if start > matched {
-					matched++
-					break
-				}
-				filteredMessages = append(filteredMessages, *msg)
-			}
-		case "containing":
-			if strings.Contains(strings.ToLower(msg.Raw.Data), query) {
-				if start > matched {
-					matched++
-					break
-				}
-				filteredMessages = append(filteredMessages, *msg)
-			}
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		log.Println(err)
-	}
-
-	msgs := data.Messages(filteredMessages)
-	return &msgs, len(filteredMessages), nil
-}
-
-// List lists stored messages by index
-func (maildir *Maildir) List(start, limit int) (*data.Messages, error) {
-	log.Println("Listing messages in", maildir.Path)
-	messages := make([]data.Message, 0)
-
+// readAll loads and parses every message stored in the maildir.
+//
+// A message's Created timestamp is taken from its file modification time, which
+// is what gives the maildir backend a stable newest-first ordering once the
+// results are sorted.
+func (maildir *Maildir) readAll() ([]data.Message, error) {
 	dir, err := os.Open(maildir.Path)
 	if err != nil {
 		return nil, err
 	}
 	defer dir.Close()
 
-	n, err := dir.Readdir(0)
+	infos, err := dir.Readdir(0)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, fileinfo := range n {
-		b, err := ioutil.ReadFile(filepath.Join(maildir.Path, fileinfo.Name()))
+	messages := make([]data.Message, 0, len(infos))
+	for _, info := range infos {
+		if info.IsDir() {
+			continue
+		}
+		b, err := ioutil.ReadFile(filepath.Join(maildir.Path, info.Name()))
 		if err != nil {
 			return nil, err
 		}
-		msg := data.FromBytes(b)
 		// FIXME domain
-		m := *msg.Parse("mailhog.example")
-		m.ID = data.MessageID(fileinfo.Name())
-		m.Created = fileinfo.ModTime()
+		m := *data.FromBytes(b).Parse("mailhog.example")
+		m.ID = data.MessageID(info.Name())
+		m.Created = info.ModTime()
 		messages = append(messages, m)
 	}
 
-	log.Printf("Found %d messages", len(messages))
-	msgs := data.Messages(messages)
+	return messages, nil
+}
+
+// Search finds messages matching the query, newest first.
+//
+// It returns the requested window of matches together with the total number of
+// matching messages, which is independent of the window. See query.go for the
+// shared listing, sorting and windowing semantics.
+//
+// Like the in-memory backend it scans every stored message, which is required
+// to compute an accurate total and a correctly ordered window from a flat
+// maildir.
+func (maildir *Maildir) Search(kind, query string, start, limit int) (*data.Messages, int, error) {
+	messages, err := maildir.readAll()
+	if err != nil {
+		log.Println(err)
+		return nil, 0, err
+	}
+
+	matched := make([]data.Message, 0)
+	for i := range messages {
+		if matches(&messages[i], kind, query) {
+			matched = append(matched, messages[i])
+		}
+	}
+
+	sortByCreatedDesc(matched)
+	page := window(matched, start, limit)
+
+	msgs := data.Messages(page)
+	return &msgs, len(matched), nil
+}
+
+// List lists stored messages, newest first, returning the requested window.
+func (maildir *Maildir) List(start, limit int) (*data.Messages, error) {
+	messages, err := maildir.readAll()
+	if err != nil {
+		return nil, err
+	}
+
+	sortByCreatedDesc(messages)
+	page := window(messages, start, limit)
+
+	msgs := data.Messages(page)
 	return &msgs, nil
 }
 
