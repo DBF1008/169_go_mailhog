@@ -1,9 +1,12 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/smtp"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/pat"
 	"github.com/ian-kent/go-log/log"
@@ -32,7 +35,21 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	}
 
 	r.Path(conf.WebPath + "/api/v2/messages").Methods("GET").HandlerFunc(apiv2.messages)
+	r.Path(conf.WebPath + "/api/v2/messages").Methods("DELETE").HandlerFunc(apiv2.deleteAll)
 	r.Path(conf.WebPath + "/api/v2/messages").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+
+	r.Path(conf.WebPath + "/api/v2/messages/{id}").Methods("GET").HandlerFunc(apiv2.message)
+	r.Path(conf.WebPath + "/api/v2/messages/{id}").Methods("DELETE").HandlerFunc(apiv2.deleteOne)
+	r.Path(conf.WebPath + "/api/v2/messages/{id}").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/download").Methods("GET").HandlerFunc(apiv2.download)
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/download").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/mime/part/{part}/download").Methods("GET").HandlerFunc(apiv2.downloadPart)
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/mime/part/{part}/download").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/release").Methods("POST").HandlerFunc(apiv2.releaseOne)
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/release").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
 	r.Path(conf.WebPath + "/api/v2/search").Methods("GET").HandlerFunc(apiv2.search)
 	r.Path(conf.WebPath + "/api/v2/search").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
@@ -255,4 +272,239 @@ func (apiv2 *APIv2) broadcast(msg *data.Message) {
 	log.Println("[APIv2] BROADCAST /api/v2/websocket")
 
 	apiv2.wsHub.Broadcast(msg)
+}
+
+func (apiv2 *APIv2) message(w http.ResponseWriter, req *http.Request) {
+	id := req.URL.Query().Get(":id")
+	log.Printf("[APIv2] GET /api/v2/messages/%s\n", id)
+
+	apiv2.defaultOptions(w, req)
+
+	msg, err := apiv2.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error loading message: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if msg == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("- Error marshaling message: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bytes)
+}
+
+func (apiv2 *APIv2) deleteOne(w http.ResponseWriter, req *http.Request) {
+	id := req.URL.Query().Get(":id")
+	log.Printf("[APIv2] DELETE /api/v2/messages/%s\n", id)
+
+	apiv2.defaultOptions(w, req)
+
+	err := apiv2.config.Storage.DeleteOne(id)
+	if err != nil {
+		log.Printf("- Error deleting message: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (apiv2 *APIv2) deleteAll(w http.ResponseWriter, req *http.Request) {
+	log.Println("[APIv2] DELETE /api/v2/messages")
+
+	apiv2.defaultOptions(w, req)
+
+	err := apiv2.config.Storage.DeleteAll()
+	if err != nil {
+		log.Printf("- Error deleting all messages: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (apiv2 *APIv2) download(w http.ResponseWriter, req *http.Request) {
+	id := req.URL.Query().Get(":id")
+	log.Printf("[APIv2] GET /api/v2/messages/%s/download\n", id)
+
+	apiv2.defaultOptions(w, req)
+
+	msg, err := apiv2.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error loading message: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if msg == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "message/rfc822")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".eml\"")
+
+	for h, l := range msg.Content.Headers {
+		for _, v := range l {
+			w.Write([]byte(h + ": " + v + "\r\n"))
+		}
+	}
+	w.Write([]byte("\r\n" + msg.Content.Body))
+}
+
+func (apiv2 *APIv2) downloadPart(w http.ResponseWriter, req *http.Request) {
+	id := req.URL.Query().Get(":id")
+	part := req.URL.Query().Get(":part")
+	log.Printf("[APIv2] GET /api/v2/messages/%s/mime/part/%s/download\n", id, part)
+
+	apiv2.defaultOptions(w, req)
+
+	msg, err := apiv2.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error loading message: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if msg == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	pid, err := strconv.Atoi(part)
+	if err != nil || msg.MIME == nil || pid < 0 || pid >= len(msg.MIME.Parts) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+"-part-"+part+"\"")
+
+	contentTransferEncoding := ""
+	for h, l := range msg.MIME.Parts[pid].Headers {
+		for _, v := range l {
+			switch strings.ToLower(h) {
+			case "content-disposition":
+				w.Header().Set(h, v)
+			case "content-transfer-encoding":
+				if contentTransferEncoding == "" {
+					contentTransferEncoding = v
+				}
+				fallthrough
+			default:
+				w.Header().Add(h, v)
+			}
+		}
+	}
+
+	body := []byte(msg.MIME.Parts[pid].Body)
+	if strings.ToLower(contentTransferEncoding) == "base64" {
+		body, err = base64.StdEncoding.DecodeString(msg.MIME.Parts[pid].Body)
+		if err != nil {
+			log.Printf("[APIv2] Decoding base64 encoded body failed: %s", err)
+		}
+	}
+	w.Write(body)
+}
+
+func (apiv2 *APIv2) releaseOne(w http.ResponseWriter, req *http.Request) {
+	id := req.URL.Query().Get(":id")
+	log.Printf("[APIv2] POST /api/v2/messages/%s/release\n", id)
+
+	apiv2.defaultOptions(w, req)
+
+	msg, err := apiv2.config.Storage.Load(id)
+	if err != nil {
+		log.Printf("- Error loading message: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if msg == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	var cfg ReleaseConfig
+	err = decoder.Decode(&cfg)
+	if err != nil {
+		log.Printf("Error decoding request body: %s", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error decoding request body"))
+		return
+	}
+
+	log.Printf("%+v", cfg)
+	log.Printf("Got message: %s", msg.ID)
+
+	if cfg.Save {
+		if _, ok := apiv2.config.OutgoingSMTP[cfg.Name]; ok {
+			log.Printf("Server already exists named %s", cfg.Name)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		cf := config.OutgoingSMTP(cfg)
+		apiv2.config.OutgoingSMTP[cfg.Name] = &cf
+		log.Printf("Saved server with name %s", cfg.Name)
+	}
+
+	if len(cfg.Name) > 0 {
+		if c, ok := apiv2.config.OutgoingSMTP[cfg.Name]; ok {
+			log.Printf("Using server with name: %s", cfg.Name)
+			cfg.Name = c.Name
+			if len(cfg.Email) == 0 {
+				cfg.Email = c.Email
+			}
+			cfg.Host = c.Host
+			cfg.Port = c.Port
+			cfg.Username = c.Username
+			cfg.Password = c.Password
+			cfg.Mechanism = c.Mechanism
+		} else {
+			log.Printf("Server not found: %s", cfg.Name)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
+
+	log.Printf("Releasing to %s (via %s:%s)", cfg.Email, cfg.Host, cfg.Port)
+
+	bytes := make([]byte, 0)
+	for h, l := range msg.Content.Headers {
+		for _, v := range l {
+			bytes = append(bytes, []byte(h+": "+v+"\r\n")...)
+		}
+	}
+	bytes = append(bytes, []byte("\r\n"+msg.Content.Body)...)
+
+	var auth smtp.Auth
+
+	if len(cfg.Username) > 0 || len(cfg.Password) > 0 {
+		log.Printf("Found username/password, using auth mechanism: [%s]", cfg.Mechanism)
+		switch cfg.Mechanism {
+		case "CRAMMD5":
+			auth = smtp.CRAMMD5Auth(cfg.Username, cfg.Password)
+		case "PLAIN":
+			auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		default:
+			log.Printf("Error - invalid authentication mechanism")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
+
+	err = smtp.SendMail(cfg.Host+":"+cfg.Port, auth, "nobody@"+apiv2.config.Hostname, []string{cfg.Email}, bytes)
+	if err != nil {
+		log.Printf("Failed to release message: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Message released successfully")
 }
